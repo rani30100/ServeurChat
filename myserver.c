@@ -13,6 +13,7 @@
 #define MAX_ROOMS 5
 #define MAX_USERS_PER_ROOM 5
 #define HISTORY_SIZE 10  // Taille de l'historique des messages par room
+int server_socket = 0;
 
 // Structure pour un message
 typedef struct {
@@ -44,7 +45,7 @@ void sigIntHandler(int sig) {
     exit(EXIT_SUCCESS);
 }
 
-void exitFunction(int server_socket) {
+void exitFunction() {
     printf("Sortie de la session...\n");
 
     // Set SO_REUSEADDR option on the server socket
@@ -90,6 +91,9 @@ void* handle_client(void* client_socket) {
         sprintf(buffer, "%s: %s", rooms[room_id].history[i].sender, rooms[room_id].history[i].message);
         write(client.socket, buffer, strlen(buffer));
     }
+
+    /*Dans le serveur de chat, certaines données partagées entre les threads doivent être protégées contre l'accès concurrent.La liste des clients dans une salle de discussion (rooms[i].clients) ou l'historique des messages (rooms[i].history). Utiliser un mutex permet de synchroniser l'accès à ces données critiques afin d'éviter les conflits lorsque plusieurs threads tentent d'accéder ou de modifier ces données en même temps.*/
+    /*Pour éviter que deux threads essayent de modifier les structures de données simultanément, on utilise le mutex pour bloquer */
     sem_post(&mutex);
 
     sprintf(buffer, "Vous êtes dans la room %d\n", room_id);
@@ -117,25 +121,28 @@ while ((n = read(client.socket, buffer, sizeof(buffer) - 1)) > 0) {
     }
     
     // Préparer le message à diffuser aux autres clients
-char message_to_send[BUFFER_SIZE];
-sprintf(message_to_send, "%s->%s", client.pseudo, buffer);
-
+    char message_to_send[BUFFER_SIZE];
+    sprintf(message_to_send, "%s->%s", client.pseudo, buffer);
 
     for (int i = 0; i < rooms[room_id].count; i++) {
         if (rooms[room_id].clients[i] != client.socket) {
             write(rooms[room_id].clients[i], message_to_send, strlen(message_to_send));
         }
     }
+
     sem_post(&mutex);
 }
 
     close(client.socket);
+    /*
+     L'utilisation de malloc nécessite une libération explicite de la mémoire avec free une fois que la variable n'est plus nécessaire (généralement après que le thread a terminé son exécution). Cela permet de gérer efficacement la mémoire et d'éviter les fuites de mémoire.
+    */
     free(client_socket);
     return NULL;
 }
 
 int main() {
-    int server_socket, client_socket, *new_sock;
+    int client_socket = 0;int *new_sock = 0;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
 
@@ -160,10 +167,18 @@ int main() {
     }
     printf("Socket created...\n");
 
-    // Préparation de la structure sockaddr_in
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+     // Activer l'option SO_REUSEADDR sur le socket serveur
+    int opt = 1;
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        perror("Échec de l'activation de SO_REUSEADDR");
+        close(server_socket);
+        exit(EXIT_FAILURE);
+    }
+
+    // Préparation de la structure sockaddr_in pour la liaison
+    server_addr.sin_family = AF_INET; // Famille d'adresses IPv4
+    server_addr.sin_addr.s_addr = INADDR_ANY; // Utilisation de toutes les interfaces réseau disponibles
+    server_addr.sin_port = htons(PORT); // Port d'écoute du serveur
 
     // Liaison du socket
     if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
