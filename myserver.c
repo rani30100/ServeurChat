@@ -95,52 +95,39 @@ void* handle_client(void* client_socket) {
     sprintf(buffer, "Vous êtes dans la room %d\n", room_id);
     write(client.socket, buffer, strlen(buffer));
 
-    while ((n = read(client.socket, buffer, sizeof(buffer) - 1)) > 0) {
-        buffer[n] = '\0';
-        printf("Client %s (room %d): %s\n", client.pseudo, room_id, buffer);
+while ((n = read(client.socket, buffer, sizeof(buffer) - 1)) > 0) {
+    buffer[n] = '\0';
+    printf("Client %s (room %d): %s\n", client.pseudo, room_id, buffer);
 
-        // Diffuser le message à tous les autres clients de la même room
-        sem_wait(&mutex);
-        // Ajouter le message à l'historique de la room
-        if (rooms[room_id].history_count < HISTORY_SIZE) {
-            strcpy(rooms[room_id].history[rooms[room_id].history_count].message, buffer);
-            strcpy(rooms[room_id].history[rooms[room_id].history_count].sender, client.pseudo);
-            rooms[room_id].history_count++;
-        } else {
-            // Décaler les messages dans l'historique circulaire
-            for (int i = 0; i < HISTORY_SIZE - 1; ++i) {
-                strcpy(rooms[room_id].history[i].message, rooms[room_id].history[i + 1].message);
-                strcpy(rooms[room_id].history[i].sender, rooms[room_id].history[i + 1].sender);
-            }
-            strcpy(rooms[room_id].history[HISTORY_SIZE - 1].message, buffer);
-            strcpy(rooms[room_id].history[HISTORY_SIZE - 1].sender, client.pseudo);
-        }
-        
-        // Préparer le message à diffuser aux autres clients
-        char message_to_send[BUFFER_SIZE];
-        sprintf(message_to_send, "Moi : %s", buffer);
-
-        for (int i = 0; i < rooms[room_id].count; i++) {
-            if (rooms[room_id].clients[i] != client.socket) {
-                write(rooms[room_id].clients[i], message_to_send, strlen(message_to_send));
-            }
-        }
-        sem_post(&mutex);
-    }
-
-
-    // Retrait du client de la room
+    // Diffuser le message à tous les autres clients de la même room
     sem_wait(&mutex);
+    // Ajouter le message à l'historique de la room
+    if (rooms[room_id].history_count < HISTORY_SIZE) {
+        strcpy(rooms[room_id].history[rooms[room_id].history_count].message, buffer);
+        strcpy(rooms[room_id].history[rooms[room_id].history_count].sender, client.pseudo);
+        rooms[room_id].history_count++;
+    } else {
+        // Décaler les messages dans l'historique circulaire
+        for (int i = 0; i < HISTORY_SIZE - 1; ++i) {
+            strcpy(rooms[room_id].history[i].message, rooms[room_id].history[i + 1].message);
+            strcpy(rooms[room_id].history[i].sender, rooms[room_id].history[i + 1].sender);
+        }
+        strcpy(rooms[room_id].history[HISTORY_SIZE - 1].message, buffer);
+        strcpy(rooms[room_id].history[HISTORY_SIZE - 1].sender, client.pseudo);
+    }
+    
+    // Préparer le message à diffuser aux autres clients
+char message_to_send[BUFFER_SIZE];
+sprintf(message_to_send, "%s->%s", client.pseudo, buffer);
+
+
     for (int i = 0; i < rooms[room_id].count; i++) {
-        if (rooms[room_id].clients[i] == client.socket) {
-            for (int j = i; j < rooms[room_id].count - 1; j++) {
-                rooms[room_id].clients[j] = rooms[room_id].clients[j + 1];
-            }
-            rooms[room_id].count--;
-            break;
+        if (rooms[room_id].clients[i] != client.socket) {
+            write(rooms[room_id].clients[i], message_to_send, strlen(message_to_send));
         }
     }
     sem_post(&mutex);
+}
 
     close(client.socket);
     free(client_socket);
