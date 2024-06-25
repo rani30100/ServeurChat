@@ -10,11 +10,33 @@
 #define PORT 8080
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
+#define MAX_ROOMS 5
+#define MAX_USERS_PER_ROOM 5
+#define HISTORY_SIZE 10  // Taille de l'historique des messages par room
+
+// Structure pour un message
+typedef struct {
+    char message[BUFFER_SIZE];
+    char sender[BUFFER_SIZE];
+} Message;
+
+// Structure pour une room
+typedef struct {
+    int clients[MAX_USERS_PER_ROOM];
+    int count;
+    Message history[HISTORY_SIZE];
+    int history_count;
+} Room;
+
+// Structure pour un client
+typedef struct {
+    int socket;
+    char pseudo[BUFFER_SIZE];
+} Client;
 
 // Déclarations globales
 sem_t mutex;
-int clients[MAX_CLIENTS];
-int client_count = 0;
+Room rooms[MAX_ROOMS];
 
 // Gestion des signaux
 void sigIntHandler(int sig) {
@@ -22,48 +44,109 @@ void sigIntHandler(int sig) {
     exit(EXIT_SUCCESS);
 }
 
-void exitFunction() {
-    printf("Exiting...\n");
+void exitFunction(int server_socket) {
+    printf("Sortie de la session...\n");
+
+    // Set SO_REUSEADDR option on the server socket
+    int opt = 1;
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("Le serveur vient de fermer... ");
+    }
+
     sem_destroy(&mutex);
+    close(server_socket);
 }
 
-// Fonction pour gérer la communication avec chaque client
+
+// Fonction pour gérer les clients une fois connecté au serveur 
 void* handle_client(void* client_socket) {
-    int sock = *(int*)client_socket;
+    Client client;
+    
+    client.socket = *(int*)client_socket;
     char buffer[BUFFER_SIZE];
     int n;
+    int room_id = -1;
 
-    while ((n = read(sock, buffer, sizeof(buffer) - 1)) > 0) {
+    // Demander le pseudo au client
+    write(client.socket, "Entrez votre pseudo: ", strlen("Entrez votre pseudo: "));
+    read(client.socket, buffer, sizeof(buffer));
+    strcpy(client.pseudo, buffer);
+
+    // Choix de la room
+    while (room_id < 0 || room_id >= MAX_ROOMS || rooms[room_id].count >= MAX_USERS_PER_ROOM) {
+        bzero(buffer, BUFFER_SIZE);
+        sprintf(buffer, "Veuillez choisir une room (0-%d): ", MAX_ROOMS - 1);
+        write(client.socket, buffer, strlen(buffer));
+        bzero(buffer, BUFFER_SIZE);
+        read(client.socket, buffer, sizeof(buffer));
+        room_id = atoi(buffer);
+    }
+
+    sem_wait(&mutex);
+    rooms[room_id].clients[rooms[room_id].count++] = client.socket;
+    
+    // Envoyer l'historique des messages au nouveau client
+    for (int i = 0; i < rooms[room_id].history_count; ++i) {
+        sprintf(buffer, "%s: %s", rooms[room_id].history[i].sender, rooms[room_id].history[i].message);
+        write(client.socket, buffer, strlen(buffer));
+    }
+    sem_post(&mutex);
+
+    sprintf(buffer, "Vous êtes dans la room %d\n", room_id);
+    write(client.socket, buffer, strlen(buffer));
+
+    while ((n = read(client.socket, buffer, sizeof(buffer) - 1)) > 0) {
         buffer[n] = '\0';
-        printf("Client %d: %s\n", sock, buffer);
+        printf("Client %s (room %d): %s\n", client.pseudo, room_id, buffer);
 
-        // Diffuse le message à tous les autres clients
+        // Diffuser le message à tous les autres clients de la même room
         sem_wait(&mutex);
-        for (int i = 0; i < client_count; i++) {
-            if (clients[i] != sock) {
-                write(clients[i], buffer, n);
+        // Ajouter le message à l'historique de la room
+        if (rooms[room_id].history_count < HISTORY_SIZE) {
+            strcpy(rooms[room_id].history[rooms[room_id].history_count].message, buffer);
+            strcpy(rooms[room_id].history[rooms[room_id].history_count].sender, client.pseudo);
+            rooms[room_id].history_count++;
+        } else {
+            // Décaler les messages dans l'historique circulaire
+            for (int i = 0; i < HISTORY_SIZE - 1; ++i) {
+                strcpy(rooms[room_id].history[i].message, rooms[room_id].history[i + 1].message);
+                strcpy(rooms[room_id].history[i].sender, rooms[room_id].history[i + 1].sender);
+            }
+            strcpy(rooms[room_id].history[HISTORY_SIZE - 1].message, buffer);
+            strcpy(rooms[room_id].history[HISTORY_SIZE - 1].sender, client.pseudo);
+        }
+        
+        // Préparer le message à diffuser aux autres clients
+        char message_to_send[BUFFER_SIZE];
+        sprintf(message_to_send, "Moi : %s", buffer);
+
+        for (int i = 0; i < rooms[room_id].count; i++) {
+            if (rooms[room_id].clients[i] != client.socket) {
+                write(rooms[room_id].clients[i], message_to_send, strlen(message_to_send));
             }
         }
         sem_post(&mutex);
     }
 
-    close(sock);
+
+    // Retrait du client de la room
     sem_wait(&mutex);
-    for (int i = 0; i < client_count; i++) {
-        if (clients[i] == sock) {
-            for (int j = i; j < client_count - 1; j++) {
-                clients[j] = clients[j + 1];
+    for (int i = 0; i < rooms[room_id].count; i++) {
+        if (rooms[room_id].clients[i] == client.socket) {
+            for (int j = i; j < rooms[room_id].count - 1; j++) {
+                rooms[room_id].clients[j] = rooms[room_id].clients[j + 1];
             }
-            client_count--;
+            rooms[room_id].count--;
             break;
         }
     }
     sem_post(&mutex);
+
+    close(client.socket);
     free(client_socket);
     return NULL;
 }
 
-// Fonction principale
 int main() {
     int server_socket, client_socket, *new_sock;
     struct sockaddr_in server_addr, client_addr;
@@ -75,6 +158,12 @@ int main() {
 
     // Initialisation du sémaphore
     sem_init(&mutex, 0, 1);
+
+    // Initialisation des rooms
+    for (int i = 0; i < MAX_ROOMS; i++) {
+        rooms[i].count = 0;
+        rooms[i].history_count = 0;
+    }
 
     // Création du socket
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -109,12 +198,8 @@ int main() {
     while ((client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len))) {
         printf("Connection accepted from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
-        sem_wait(&mutex);
-        clients[client_count++] = client_socket;
-        sem_post(&mutex);
-
         pthread_t client_thread;
-        new_sock = malloc(1);
+        new_sock = malloc(sizeof(int));
         *new_sock = client_socket;
 
         if (pthread_create(&client_thread, NULL, handle_client, (void*)new_sock) < 0) {
@@ -132,5 +217,6 @@ int main() {
     }
 
     close(server_socket);
+    
     return 0;
 }
