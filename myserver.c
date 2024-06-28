@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
+#include <ctype.h> // Include this for isdigit
 
 #define PORT 8080
 #define MAX_CLIENTS 10
@@ -139,6 +140,17 @@ void convert_text_to_emoticons(char *buffer) {
     }
 }
 
+// Fonction est un nombre
+int is_number(const char *str) {
+    while (*str) {
+        if (!isdigit(*str)) {
+            return 0;
+        }
+        str++; 
+    }
+    return 1; 
+}
+
 // Gestion des signaux
 void sigIntHandler(int sig) {
     printf(">>> SIGINT received [%d]. Shutting down server...\n", sig);
@@ -195,13 +207,13 @@ int initSocket(struct sockaddr_in *adresse) {
     return sock;
 }
 
-// Fonction pour gérer les clients une fois connecté au serveur 
+// Fonction pour gérer les clients une fois connectés au serveur
 void* handle_client(void* client_socket) {
     Client client;
     
     client.socket = *(int*)client_socket;
     char buffer[BUFFER_SIZE];
-    int n = 0 ;
+    int n = 0;
     int room_id = -1;
 
     // Demander le pseudo au client
@@ -216,7 +228,21 @@ void* handle_client(void* client_socket) {
         write(client.socket, buffer, strlen(buffer));
         bzero(buffer, BUFFER_SIZE);
         read(client.socket, buffer, sizeof(buffer));
+        
+        if (!is_number(buffer)) {
+            bzero(buffer, BUFFER_SIZE);
+            sprintf(buffer, "Veuillez saisir un chiffre.\n");
+            write(client.socket, buffer, strlen(buffer));
+            continue;
+        }
+
         room_id = atoi(buffer);
+        
+        if (room_id < 0 || room_id >= MAX_ROOMS || rooms[room_id].count >= MAX_USERS_PER_ROOM) {
+            bzero(buffer, BUFFER_SIZE);
+            sprintf(buffer, "Veuillez saisir une valeur entre 0 et %d pour une room disponible.\n", MAX_ROOMS - 1);
+            write(client.socket, buffer, strlen(buffer));
+        }
     }
 
     sem_wait(&mutex);
@@ -227,8 +253,6 @@ void* handle_client(void* client_socket) {
         sprintf(buffer, "%s: %s", rooms[room_id].history[i].sender, rooms[room_id].history[i].message);
         write(client.socket, buffer, strlen(buffer));
     }
-    /*Dans le serveur de chat, certaines données partagées entre les threads doivent être protégées contre l'accès concurrent.La liste des clients dans une salle de discussion (rooms[i].clients) ou l'historique des messages (rooms[i].history). Utiliser un mutex permet de synchroniser l'accès à ces données critiques afin d'éviter les conflits lorsque plusieurs threads tentent d'accéder ou de modifier ces données en même temps.*/
-    /*Pour éviter que deux threads essayent de modifier les structures de données simultanément, on utilise le mutex pour bloquer */
     sem_post(&mutex);
 
     sprintf(buffer, "Vous êtes dans la room %d\n", room_id);
@@ -268,9 +292,6 @@ void* handle_client(void* client_socket) {
     }
 
     close(client.socket);
-    /*
-     L'utilisation de malloc nécessite une libération explicite de la mémoire avec free une fois que la variable n'est plus nécessaire (généralement après que le thread a terminé son exécution). Cela permet de gérer efficacement la mémoire et d'éviter les fuites de mémoire.
-    */
     free(client_socket);
     return NULL;
 }
