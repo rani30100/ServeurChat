@@ -258,13 +258,9 @@ void* handle_client(void* client_socket) {
         char message_to_send[BUFFER_SIZE];
         sprintf(message_to_send, "%s->%s", client.pseudo, buffer);
 
-        for (int i = 0; i < rooms[room_id].count; ++i) {
+        for (int i = 0; i < rooms[room_id].count; i++) {
             if (rooms[room_id].clients[i] != client.socket) {
-                sprintf(buffer, "%s: %s\n", client.pseudo, msg.message);
-                write(rooms[room_id].clients[i], buffer, strlen(buffer));
-            } else {
-                sprintf(buffer, "Moi: %s\n", msg.message);
-                write(client.socket, buffer, strlen(buffer));
+                write(rooms[room_id].clients[i], message_to_send, strlen(message_to_send));
             }
         }
 
