@@ -6,23 +6,28 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
-#include <ctype.h> // Include this for isdigit
+#include <ctype.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
 #define MAX_ROOMS 5
 #define MAX_USERS_PER_ROOM 5
-#define HISTORY_SIZE 10  // Taille de l'historique des messages par room
+#define HISTORY_SIZE 10
+
 int server_socket = 0;
 
-// Structure pour un message
+// Define global variables to store program name and arguments
+char *program_name;
+char **program_args;
+
+// Structure for a message
 typedef struct {
     char message[BUFFER_SIZE];
     char sender[BUFFER_SIZE];
 } Message;
 
-// Structure pour une room Max 5 users
+// Structure for a room
 typedef struct {
     int clients[MAX_USERS_PER_ROOM];
     int count;
@@ -30,12 +35,13 @@ typedef struct {
     int history_count;
 } Room;
 
-// Structure pour un client avec socket Id et pseudo
+// Structure for a client
 typedef struct {
     int socket;
     char pseudo[BUFFER_SIZE];
 } Client;
 
+// Define emoticons
 typedef struct {
     char *sequence;
     char *emoticon;
@@ -123,11 +129,12 @@ EmoticonMap emoticons[] = {
 };
 
 #define EMOTICON_COUNT (sizeof(emoticons) / sizeof(EmoticonMap))
-// Déclarations globales
+
+// Global declarations
 sem_t mutex;
 Room rooms[MAX_ROOMS];
 
-// Fonction pour convertir le texte en émoticônes
+// Convert text to emoticons
 void convert_text_to_emoticons(char *buffer) {
     for (int i = 0; i < EMOTICON_COUNT; ++i) {
         char *pos;
@@ -140,7 +147,7 @@ void convert_text_to_emoticons(char *buffer) {
     }
 }
 
-// Fonction est un nombre
+// Check if a string is a number
 int is_number(const char *str) {
     while (*str) {
         if (!isdigit(*str)) {
@@ -151,33 +158,39 @@ int is_number(const char *str) {
     return 1; 
 }
 
-// Gestion des signaux
+// Signal handler for SIGINT
 void sigIntHandler(int sig) {
     printf(">>> SIGINT received [%d]. Shutting down server...\n", sig);
     exit(EXIT_SUCCESS);
 }
 
-void exitFunction() {
-    printf("Sortie de la session...\n");
+// Signal handler for SIGHUP
+void sigHupHandler(int sig) {
+    printf(">>> SIGHUP received [%d]. Reloading program...\n", sig);
+    execvp(program_name, program_args);
+    perror("execvp failed");
+    exit(EXIT_FAILURE);
+}
 
-    // Set SO_REUSEADDR option on the server socket
+// Cleanup before exit
+void exitFunction() {
+    printf("Cleaning up before exiting...\n");
     int opt = 1;
     if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("Le serveur vient de fermer... ");
+        perror("Server shutdown failed");
     }
-
     sem_destroy(&mutex);
     close(server_socket);
 }
 
-// Fonction pour initialiser l'adresse
+// Initialize server address
 void initAdresse(struct sockaddr_in *adresse) {
     adresse->sin_family = AF_INET;
     adresse->sin_addr.s_addr = INADDR_ANY;
     adresse->sin_port = htons(PORT);
 }
 
-// Fonction pour initialiser le socket
+// Initialize socket
 int initSocket(struct sockaddr_in *adresse) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == -1) {
@@ -187,7 +200,7 @@ int initSocket(struct sockaddr_in *adresse) {
 
     int opt = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-        perror("Échec de l'activation de SO_REUSEADDR");
+        perror("Failed to set socket options");
         close(sock);
         exit(EXIT_FAILURE);
     }
@@ -207,65 +220,62 @@ int initSocket(struct sockaddr_in *adresse) {
     return sock;
 }
 
-// Fonction pour gérer les clients une fois connectés au serveur
+// Handle client connections
 void* handle_client(void* client_socket) {
     Client client;
-    
     client.socket = *(int*)client_socket;
     char buffer[BUFFER_SIZE];
     int n = 0;
     int room_id = -1;
 
-    // Demander le pseudo au client
-    write(client.socket, "Entrez votre pseudo: ", strlen("Entrez votre pseudo: "));
+    // Request pseudo
+    write(client.socket, "Enter your pseudo: ", strlen("Enter your pseudo: "));
     read(client.socket, buffer, sizeof(buffer));
+    buffer[strcspn(buffer, "\r\n")] = 0; // Remove newline characters
     strcpy(client.pseudo, buffer);
 
-    // Choix de la room
+    // Choose a room
     while (room_id < 0 || room_id >= MAX_ROOMS || rooms[room_id].count >= MAX_USERS_PER_ROOM) {
         bzero(buffer, BUFFER_SIZE);
-        sprintf(buffer, "Veuillez choisir une room (0-%d): ", MAX_ROOMS - 1);
+        sprintf(buffer, "Please choose a room (0-%d): ", MAX_ROOMS - 1);
         write(client.socket, buffer, strlen(buffer));
         bzero(buffer, BUFFER_SIZE);
         read(client.socket, buffer, sizeof(buffer));
-        
-        if (!is_number(buffer)) {
-            bzero(buffer, BUFFER_SIZE);
-            sprintf(buffer, "Veuillez saisir un chiffre.\n");
-            write(client.socket, buffer, strlen(buffer));
+        buffer[strcspn(buffer, "\r\n")] = 0; // Remove newline characters
+
+        if (strlen(buffer) == 0 || !is_number(buffer)) {
+            write(client.socket, "Please enter a valid number.\n", strlen("Please enter a valid number.\n"));
             continue;
         }
 
         room_id = atoi(buffer);
-        
+
         if (room_id < 0 || room_id >= MAX_ROOMS || rooms[room_id].count >= MAX_USERS_PER_ROOM) {
-            bzero(buffer, BUFFER_SIZE);
-            sprintf(buffer, "Veuillez saisir une valeur entre 0 et %d pour une room disponible.\n", MAX_ROOMS - 1);
+            sprintf(buffer, "Please enter a value between 0 and %d for an available room.\n", MAX_ROOMS - 1);
             write(client.socket, buffer, strlen(buffer));
         }
     }
 
     sem_wait(&mutex);
     rooms[room_id].clients[rooms[room_id].count++] = client.socket;
-    
-    // Envoyer l'historique des messages au nouveau client
+
+    // Send the message history to the new client
     for (int i = 0; i < rooms[room_id].history_count; ++i) {
         sprintf(buffer, "%s: %s", rooms[room_id].history[i].sender, rooms[room_id].history[i].message);
         write(client.socket, buffer, strlen(buffer));
     }
     sem_post(&mutex);
 
-    sprintf(buffer, "Vous êtes dans la room %d\n", room_id);
+    sprintf(buffer, "You are in room %d\n", room_id);
     write(client.socket, buffer, strlen(buffer));
 
     while ((n = read(client.socket, buffer, sizeof(buffer) - 1)) > 0) {
         buffer[n] = '\0';
         printf("Client %s (room %d): %s\n", client.pseudo, room_id, buffer);
-        // Convertir le texte en émoticônes avant de diffuser le message
         convert_text_to_emoticons(buffer);
-        // Diffuser le message à tous les autres clients de la même room
+
         sem_wait(&mutex);
-        // Ajouter le message à l'historique de la room
+
         if (rooms[room_id].history_count < HISTORY_SIZE) {
             strcpy(rooms[room_id].history[rooms[room_id].history_count].message, buffer);
             strcpy(rooms[room_id].history[rooms[room_id].history_count].sender, client.pseudo);
@@ -278,7 +288,7 @@ void* handle_client(void* client_socket) {
             strcpy(rooms[room_id].history[HISTORY_SIZE - 1].message, buffer);
             strcpy(rooms[room_id].history[HISTORY_SIZE - 1].sender, client.pseudo);
         }
-        // Préparer le message à diffuser aux autres clients
+
         char message_to_send[BUFFER_SIZE];
         sprintf(message_to_send, "%s->%s", client.pseudo, buffer);
 
@@ -296,11 +306,15 @@ void* handle_client(void* client_socket) {
     return NULL;
 }
 
-void manageClient(int clients[]);
+// Main function
+int main(int argc, char *argv[]) {
+    program_name = argv[0];
+    program_args = argv;
 
-int main() {
+    // Display the PID of the program when it starts
+    printf("Server starting with PID: %d\n", getpid());
+
     int client_socket = 0;
-    int *new_sock = 0;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
 
@@ -308,6 +322,7 @@ int main() {
     server_socket = initSocket(&server_addr);
 
     signal(SIGINT, sigIntHandler);
+    signal(SIGHUP, sigHupHandler);  // Handle SIGHUP
     atexit(exitFunction);
 
     sem_init(&mutex, 0, 1);
@@ -320,10 +335,9 @@ int main() {
     printf("Waiting for incoming connections...\n");
 
     while ((client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len))) {
-        printf("Connection accepted from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-
+        printf("Connection accepted\n");
         pthread_t client_thread;
-        new_sock = malloc(sizeof(int));
+        int *new_sock = malloc(sizeof(int));
         *new_sock = client_socket;
 
         if (pthread_create(&client_thread, NULL, handle_client, (void*)new_sock) < 0) {
@@ -341,6 +355,5 @@ int main() {
     }
 
     close(server_socket);
-    
     return 0;
 }
