@@ -311,6 +311,46 @@ int main(int argc, char *argv[]) {
     program_name = argv[0];
     program_args = argv;
 
+    // Check if the program should run in daemon mode
+    int daemon_mode = 0;
+    if (argc > 1 && strcmp(argv[1], "-d") == 0) {
+        daemon_mode = 1;
+    }
+
+    if (daemon_mode) {
+        // Fork the process to create a daemon
+        pid_t pid = fork();
+
+        if (pid < 0) {
+            perror("Fork failed");
+            exit(EXIT_FAILURE);
+        }
+
+        if (pid > 0) {
+            // Parent process exits, leaving the child process running as a daemon
+            exit(EXIT_SUCCESS);
+        }
+
+        // Child process (daemon)
+        umask(0); // Set file permissions mask
+        if (setsid() < 0) { // Create a new session
+            perror("setsid failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // Redirect standard files to /dev/null
+        freopen("/dev/null", "r", stdin);
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+
+        // In daemon mode, ignore the SIGHUP signal
+        signal(SIGHUP, SIG_IGN);
+
+    } else {
+        // Normal mode: handle SIGHUP for reloading
+        signal(SIGHUP, sigHupHandler);
+    }
+
     // Display the PID of the program when it starts
     printf("Server starting with PID: %d\n", getpid());
 
@@ -322,7 +362,6 @@ int main(int argc, char *argv[]) {
     server_socket = initSocket(&server_addr);
 
     signal(SIGINT, sigIntHandler);
-    signal(SIGHUP, sigHupHandler);  // Handle SIGHUP
     atexit(exitFunction);
 
     sem_init(&mutex, 0, 1);
