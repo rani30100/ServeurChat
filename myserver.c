@@ -7,6 +7,9 @@
 #include <semaphore.h>
 #include <signal.h>
 #include <ctype.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
 
 #define PORT 8080
 #define MAX_CLIENTS 10
@@ -14,12 +17,26 @@
 #define MAX_ROOMS 5
 #define MAX_USERS_PER_ROOM 5
 #define HISTORY_SIZE 10
+#define LOG_FILE "server.log"
+#define MAX_LOG_LINES 100
 
 int server_socket = 0;
 
 // Define global variables to store program name and arguments
 char *program_name;
 char **program_args;
+
+// Function to check if a string represents a number
+int is_number(const char *str) {
+    while (*str) {
+        if (!isdigit(*str)) {
+            return 0;
+        }
+        str++; 
+    }
+    return 1; 
+}
+
 
 // Structure for a message
 typedef struct {
@@ -41,7 +58,10 @@ typedef struct {
     char pseudo[BUFFER_SIZE];
 } Client;
 
-// Define emoticons
+Room rooms[MAX_ROOMS];
+sem_t mutex;
+
+// Emoticon mappings
 typedef struct {
     char *sequence;
     char *emoticon;
@@ -63,35 +83,17 @@ EmoticonMap emoticons[] = {
     {"thumbs-up", "👍"},
     {"thumbs-down", "👎"},
     {"fist", "✊"},
-    {"raised-fist", "✊"},
     {"wave", "👋"},
     {"clap", "👏"},
-    {"handshake", "🤝"},
     {"star", "⭐️"},
     {"sun", "☀️"},
     {"moon", "🌙"},
     {"rainbow", "🌈"},
     {"flower", "🌸"},
-    {"gift", "🎁"},
     {"cake", "🍰"},
     {"pizza", "🍕"},
-    {"hamburger", "🍔"},
-    {"fries", "🍟"},
-    {"ice-cream", "🍦"},
-    {"coffee", "☕️"},
     {"beer", "🍺"},
-    {"wine", "🍷"},
-    {"cocktail", "🍹"},
-    {"bottle", "🍾"},
-    {"balloon", "🎈"},
     {"music", "🎵"},
-    {"movie", "🎥"},
-    {"computer", "💻"},
-    {"phone", "📱"},
-    {"book", "📚"},
-    {"money", "💵"},
-    {"calendar", "📅"},
-    {"house", "🏠"},
     {"car", "🚗"},
     {"airplane", "✈️"},
     {"boat", "⛵️"},
@@ -100,41 +102,77 @@ EmoticonMap emoticons[] = {
     {"sad", "😞"},
     {"angry", "😡"},
     {"surprised", "😮"},
-    {"tired", "😴"},
-    {"sick", "🤒"},
-    {"crazy", "😜"},
-    {"scared", "😱"},
     {"love", "😍"},
-    {"party", "🎉"},
-    {"work", "💼"},
-    {"study", "📖"},
-    {"sport", "⚽️"},
-    {"game", "🎮"},
-    {"holiday", "🏖️"},
-    {"health", "🏥"},
-    {"school", "🏫"},
-    {"euro", "💶"},
-    {"dollar", "💵"},
-    {"pound", "💷"},
-    {"roll", "🍣"},
-    {"sushi", "🍱"},
-    {"rice-ball", "🍙"},
-    {"pine-decoration", "🎍"},
-    {"drink", "🍸"},
-    {"strawberry", "🍓"},
-    {"lemon", "🍋"},
-    {"peach", "🍑"},
-    {"cherries", "🍒"},
-    {"chestnut", "🌰"},
+    {"party", "🎉"}
 };
 
 #define EMOTICON_COUNT (sizeof(emoticons) / sizeof(EmoticonMap))
 
-// Global declarations
-sem_t mutex;
-Room rooms[MAX_ROOMS];
+// Function to count the number of lines in the log file
+int count_lines_in_file(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) return 0;
 
-// Convert text to emoticons
+    int count = 0;
+    char buffer[BUFFER_SIZE];
+    while (fgets(buffer, sizeof(buffer), file)) {
+        count++;
+    }
+
+    fclose(file);
+    return count;
+}
+
+// Function to write to the log file, maintaining a maximum of 100 lines
+void log_message(const char *room, const char *sender, const char *message) {
+    sem_wait(&mutex);
+
+    int line_count = count_lines_in_file(LOG_FILE);
+
+    FILE *file = fopen(LOG_FILE, "a+");
+    if (!file) {
+        perror("Could not open log file");
+        sem_post(&mutex);
+        return;
+    }
+
+    // If the log file exceeds the maximum number of lines, remove the oldest line
+    if (line_count >= MAX_LOG_LINES) {
+        fclose(file);
+        FILE *temp_file = fopen("temp.log", "w");
+        file = fopen(LOG_FILE, "r");
+
+        if (!temp_file || !file) {
+            perror("Could not open temporary log file");
+            sem_post(&mutex);
+            return;
+        }
+
+        char buffer[BUFFER_SIZE];
+        int skip_line = 1;
+        while (fgets(buffer, sizeof(buffer), file)) {
+            if (skip_line) {
+                skip_line = 0; // Skip the first line
+            } else {
+                fputs(buffer, temp_file);
+            }
+        }
+
+        fclose(file);
+        fclose(temp_file);
+        remove(LOG_FILE);
+        rename("temp.log", LOG_FILE);
+        file = fopen(LOG_FILE, "a");
+    }
+
+    // Write the new log entry
+    fprintf(file, "[Room %s] %s: %s\n", room, sender, message);
+    fclose(file);
+
+    sem_post(&mutex);
+}
+
+// Function to convert text to emoticons
 void convert_text_to_emoticons(char *buffer) {
     for (int i = 0; i < EMOTICON_COUNT; ++i) {
         char *pos;
@@ -145,17 +183,6 @@ void convert_text_to_emoticons(char *buffer) {
             memcpy(pos, emoticons[i].emoticon, len_emoticon);
         }
     }
-}
-
-// Check if a string is a number
-int is_number(const char *str) {
-    while (*str) {
-        if (!isdigit(*str)) {
-            return 0;
-        }
-        str++; 
-    }
-    return 1; 
 }
 
 // Signal handler for SIGINT
@@ -273,6 +300,11 @@ void* handle_client(void* client_socket) {
         buffer[n] = '\0';
         printf("Client %s (room %d): %s\n", client.pseudo, room_id, buffer);
         convert_text_to_emoticons(buffer);
+
+        // Log the message to the file
+        char room_str[16];
+        sprintf(room_str, "%d", room_id);
+        log_message(room_str, client.pseudo, buffer);
 
         sem_wait(&mutex);
 
